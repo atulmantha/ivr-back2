@@ -505,7 +505,7 @@ app.post("/api/twilio/voice", async (req, res) => {
     res.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather input="dtmf speech" action="${menuUrl}" method="POST" timeout="8" numDigits="1" speechTimeout="auto">
-    <Say voice="alice">For Service, press 1. For General queries, press 2. For Billing, press 3. Or in a few words, please tell me how I can help you.</Say>
+    <Say voice="alice">For Billing, press 1. For New Lines or New Services, press 2. For Service related Queries, press 3. For General Inquiries, press 4. Or in a few words, please tell me how I can help you.</Say>
   </Gather>
   <Redirect method="POST">${noInputUrl}</Redirect>
 </Response>`);
@@ -530,14 +530,16 @@ app.post("/api/twilio/ivr-menu", async (req, res) => {
 
   // Map input to a support category
   let category, categoryLabel;
-  if (digits === "1" || /service|technical|issue|problem|not working|outage|slow|broken/i.test(speech)) {
-    category = "service";      categoryLabel = "Service";
-  } else if (digits === "2" || /general|help|question|query|support/i.test(speech)) {
-    category = "general";      categoryLabel = "General";
-  } else if (digits === "3" || /billing|bill|payment|invoice|charge/i.test(speech)) {
+  if (digits === "1" || /billing|bill|payment|invoice|charge/i.test(speech)) {
     category = "billing";      categoryLabel = "Billing";
+  } else if (digits === "2" || /new line|new service|add line|upgrade|plan|activate/i.test(speech)) {
+    category = "new_lines";    categoryLabel = "New Lines and Services";
+  } else if (digits === "3" || /service|technical|issue|problem|not working|outage|slow|broken/i.test(speech)) {
+    category = "service";      categoryLabel = "Service Support";
+  } else if (digits === "4" || /general|other|help|anything/i.test(speech)) {
+    category = "general";      categoryLabel = "General Support";
   } else {
-    category = "general";      categoryLabel = "General";
+    category = "general";      categoryLabel = "General Support";
   }
 
   if (callId) {
@@ -603,7 +605,7 @@ app.post("/api/twilio/ivr-query", async (req, res) => {
       statusCallback:       `${BASE_URL}/api/twilio/agent-status?call_id=${callId}&identity=${agentIdentity}`,
       statusCallbackEvent:  ["completed", "no-answer", "busy", "failed"],
       statusCallbackMethod: "POST",
-      timeout: 15,
+      timeout: 8,
     }).then((call) => {
       console.log(`[ivr-query] Agent call created ✓ SID=${call.sid} identity=${agentIdentity}`);
     }).catch((err) => {
@@ -664,7 +666,7 @@ app.post("/api/twilio/ivr-noinput", async (req, res) => {
   return res.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather input="dtmf speech" action="${menuUrl}" method="POST" timeout="8" numDigits="1" speechTimeout="auto">
-    <Say voice="alice">I have not received any input. For Service press 1, for General queries press 2, for Billing press 3. Or please tell me how I can help you.</Say>
+    <Say voice="alice">I have not received any input. For Billing press 1, for New Lines or New Services press 2, for Service related Queries press 3. Or please tell me how I can help you.</Say>
   </Gather>
   <Redirect method="POST">${noInputUrl}</Redirect>
 </Response>`);
@@ -775,20 +777,51 @@ app.post("/api/twilio/outbound-customer", (req, res) => {
 
 // -- Conference status callback (called when conference ends) -
 app.post("/api/conference-status", (req, res) => {
-  const callId = String(req.query.call_id        || "").trim();
-  const event  = String(req.body.StatusCallbackEvent || "").trim();
+  res.status(200).end();
+
+  const callId        = String(req.query.call_id            || "").trim();
+  const event         = String(req.body.StatusCallbackEvent || "").trim();
+  const conferenceSid = String(req.body.ConferenceSid       || "").trim();
 
   if (event === "conference-end" && callId) {
-    console.log(`[conference-status] Conference ended callId=${callId}`);
+    console.log(`[conference-status] Conference ended callId=${callId} conferenceSid=${conferenceSid}`);
     supabase.from("calls").update({ status: "disconnected" })
       .eq("id", callId)
       .then(({ error }) => {
         if (error) console.error("[conference-status] Status update:", error.message);
         else console.log(`[conference-status] Call ${callId} marked disconnected ✓`);
       });
-  }
 
-  res.status(200).end();
+    // Fallback: if the recordingStatusCallback webhook was missed (e.g. wrong BASE_URL),
+    // query Twilio REST API directly after 90 s (enough time for encoding to finish).
+    if (twilioClient && conferenceSid) {
+      setTimeout(async () => {
+        try {
+          console.log(`[recording-sync] Querying Twilio for recordings conferenceSid=${conferenceSid}`);
+          const recs = await twilioClient.recordings.list({ conferenceSid, limit: 10 });
+          if (!recs.length) {
+            console.log(`[recording-sync] No recordings found for conferenceSid=${conferenceSid}`);
+            return;
+          }
+          for (const rec of recs) {
+            const { error } = await supabase.from("recordings").upsert({
+              call_id:          callId,
+              recording_sid:    rec.sid,
+              recording_url:    rec.mediaUrl || null,
+              duration_seconds: rec.duration ? parseInt(String(rec.duration), 10) : null,
+              status:           rec.status,
+              completed_at:     rec.status === "completed" ? new Date().toISOString() : null,
+            }, { onConflict: "recording_sid" });
+            if (error) console.error(`[recording-sync] Upsert error sid=${rec.sid}:`, error.message);
+            else console.log(`[recording-sync] Recording saved ✓ sid=${rec.sid} status=${rec.status}`);
+          }
+        } catch (err) {
+          console.error("[recording-sync] Twilio fetch error:", err.message);
+        }
+      }, 90_000);
+      console.log(`[recording-sync] Scheduled fallback recording sync in 90 s for callId=${callId}`);
+    }
+  }
 });
 
 // -- Fetch customer's recent bills from DB (graceful — works even if table missing) --
@@ -1126,7 +1159,7 @@ app.post("/api/twilio/agent-status", async (req, res) => {
       statusCallback:       `${BASE_URL}/api/twilio/agent-status?call_id=${callId}&identity=agent_general`,
       statusCallbackEvent:  ["completed", "no-answer", "busy", "failed"],
       statusCallbackMethod: "POST",
-      timeout: 15,
+      timeout: 8,
     }).then((call) => {
       console.log(`[agent-status] Fallback agent call created ✓ SID=${call.sid}`);
     }).catch((err) => {
@@ -1168,6 +1201,49 @@ app.post("/api/twilio/recording-status", async (req, res) => {
 
   if (error) console.error("[recording] Save error:", error.message);
   else console.log(`[recording] ${status} recording saved ✓ sid=${sid}`);
+});
+
+// -- Manual recording sync: pulls Twilio recordings into the DB ----------
+// Called from the dashboard "Sync" button when the webhook was missed.
+app.get("/api/recordings/sync", async (req, res) => {
+  if (!twilioClient) return res.status(503).json({ error: "Twilio not configured." });
+
+  try {
+    const recs = await twilioClient.recordings.list({ limit: 50 });
+    let synced = 0;
+
+    for (const rec of recs) {
+      if (!rec.conferenceSid) continue;
+
+      // Derive our internal callId from the conference friendly name (room-{callId})
+      let callId = null;
+      try {
+        const conf = await twilioClient.conferences(rec.conferenceSid).fetch();
+        const m = conf.friendlyName?.match(/^room-(.+)$/);
+        if (m) callId = m[1];
+      } catch { continue; }
+
+      if (!callId) continue;
+
+      const { error } = await supabase.from("recordings").upsert({
+        call_id:          callId,
+        recording_sid:    rec.sid,
+        recording_url:    rec.mediaUrl || null,
+        duration_seconds: rec.duration ? parseInt(String(rec.duration), 10) : null,
+        status:           rec.status,
+        completed_at:     rec.status === "completed" ? new Date().toISOString() : null,
+      }, { onConflict: "recording_sid" });
+
+      if (!error) synced++;
+      else console.error(`[recordings-sync] ${rec.sid}:`, error.message);
+    }
+
+    console.log(`[recordings-sync] Synced ${synced} of ${recs.length} recordings`);
+    return res.json({ ok: true, synced, total: recs.length });
+  } catch (err) {
+    console.error("[recordings-sync] Error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // -- Stream a Twilio recording to the browser (proxies with Basic Auth) --
