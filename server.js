@@ -505,7 +505,7 @@ app.post("/api/twilio/voice", async (req, res) => {
     res.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather input="dtmf speech" action="${menuUrl}" method="POST" timeout="8" numDigits="1" speechTimeout="auto">
-    <Say voice="alice">For Billing, press 1. For New Lines or New Services, press 2. For Service related Queries, press 3. Or in a few words, please tell me how I can help you.</Say>
+    <Say voice="alice">For Service, press 1. For General queries, press 2. For Billing, press 3. Or in a few words, please tell me how I can help you.</Say>
   </Gather>
   <Redirect method="POST">${noInputUrl}</Redirect>
 </Response>`);
@@ -530,14 +530,14 @@ app.post("/api/twilio/ivr-menu", async (req, res) => {
 
   // Map input to a support category
   let category, categoryLabel;
-  if (digits === "1" || /billing|bill|payment|invoice|charge/i.test(speech)) {
+  if (digits === "1" || /service|technical|issue|problem|not working|outage|slow|broken/i.test(speech)) {
+    category = "service";      categoryLabel = "Service";
+  } else if (digits === "2" || /general|help|question|query|support/i.test(speech)) {
+    category = "general";      categoryLabel = "General";
+  } else if (digits === "3" || /billing|bill|payment|invoice|charge/i.test(speech)) {
     category = "billing";      categoryLabel = "Billing";
-  } else if (digits === "2" || /new line|new service|add line|upgrade|plan|activate/i.test(speech)) {
-    category = "new_lines";    categoryLabel = "New Lines and Services";
-  } else if (digits === "3" || /service|technical|issue|problem|not working|outage|slow|broken/i.test(speech)) {
-    category = "service";      categoryLabel = "Service Support";
   } else {
-    category = "general";      categoryLabel = "Support";
+    category = "general";      categoryLabel = "General";
   }
 
   if (callId) {
@@ -664,7 +664,7 @@ app.post("/api/twilio/ivr-noinput", async (req, res) => {
   return res.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather input="dtmf speech" action="${menuUrl}" method="POST" timeout="8" numDigits="1" speechTimeout="auto">
-    <Say voice="alice">I have not received any input. For Billing press 1, for New Lines or New Services press 2, for Service related Queries press 3. Or please tell me how I can help you.</Say>
+    <Say voice="alice">I have not received any input. For Service press 1, for General queries press 2, for Billing press 3. Or please tell me how I can help you.</Say>
   </Gather>
   <Redirect method="POST">${noInputUrl}</Redirect>
 </Response>`);
